@@ -1,0 +1,257 @@
+name: package-macos
+
+# scripts/package.sh with the macOS 27.3 (26C5035r) profile on a macOS runner, plus the userdata root image
+# that profile boots from. The UniXNU checkout is pinned at a revision that carries profiles/os/macos-27.3-26C5035r
+# (package.yml pins an older one for the iPadOS profiles).
+#
+# Jobs:
+#   boot      boot.img, payload.img, kernel.macho and the manifest. The platform seed comes from the repository
+#             secret UNIXNU_UNIQUE_CHIP_ID and is baked into the images.
+#   userdata  userdata-root.img: the OS, SystemOS and App disk images of the IPSW behind the SHNGROOT manifest,
+#             for `fastboot flash userdata`. It does not depend on the seed and runs on its own runner for disk space.
+#
+# The Data seed (data.dbr) is installation state: the first build of an installation creates it (init_data), later
+# builds must reuse the same seed (Actions cache, or data_seed_url). Every run uploads it as a backup artifact.
+# The artifacts belong to one device and derive from Apple software: download them, then delete the run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      init_data:
+        description: "FIRST installation: create a new macOS Data seed when no saved seed exists"
+        type: boolean
+        default: false
+      skip_setup:
+        description: "New seed only: mark Setup Assistant done (use with the MACOS_USER secret)"
+        type: boolean
+        default: false
+      userdata:
+        description: "Also build userdata-root.img (about 16.5 GB, needed for the first installation)"
+        type: boolean
+        default: true
+      data_seed_url:
+        description: "Optional original data.dbr URL for an existing installation; otherwise use the saved cache"
+        type: string
+      data_seed_sha256:
+        description: "Required SHA-256 when data_seed_url is supplied"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OS_PROFILE: macos-27.3-26C5035r
+  # out/<board>/<os profile>/<defconfig without _defconfig>, from board.toml [package.defconfig].
+  WORK: UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos
+  UNIXNU_REF: 82522c4e12a5f32e0b64abd515d4fcd1aaea40c0
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+
+defaults:
+  run:
+    # bash -eo pipefail: the package step's tee must not hide a failed build.
+    shell: bash
+
+jobs:
+  boot:
+    runs-on: macos-26
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: device
+          submodules: recursive
+      - uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: ${{ env.UNIXNU_REF }}
+          path: UniXNU
+          submodules: recursive
+      - uses: actions/checkout@v4
+        with:
+          repository: UniXNU/uefi-sheng
+          path: uefi-sheng
+          submodules: recursive
+      - name: disk space
+        run: |
+          df -h "$GITHUB_WORKSPACE"
+          # The Android SDK is not used by this build and takes several GB.
+          rm -rf "$HOME/Library/Android" || true
+          df -h "$GITHUB_WORKSPACE"
+      - name: tools
+        run: |
+          brew install dtc llvm lld cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup blacktop/tap/ipsw
+          {
+            echo "$HOME/.cargo/bin"
+            echo "/opt/homebrew/opt/llvm/bin"
+            echo "/opt/homebrew/opt/lld/bin"
+            echo "/opt/homebrew/opt/bison/bin"
+          } >> "$GITHUB_PATH"
+          rustup toolchain install 1.98.0 --profile minimal --component rust-src
+          ok=1
+          for t in clang xcodebuild make git ninja cmake dtc fdtget fdtput aea compression_tool \
+                   mformat mcopy ipsw hdiutil; do
+            command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
+          done
+          for t in lld-link llvm-lib llvm-rc llvm-nm llvm-objcopy; do
+            [ -f "/opt/homebrew/opt/llvm/bin/$t" ] || [ -f "/opt/homebrew/opt/lld/bin/$t" ] || { echo "missing tool: $t"; ok=0; }
+          done
+          [ "$ok" = 1 ]
+      - name: platform seed
+        env:
+          seed: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          if ! [[ "$seed" =~ ^[0-9a-fA-F]{8}$ ]]; then
+            echo 'Set the repository secret UNIXNU_UNIQUE_CHIP_ID: the platform seed of the device, 8 hex digits.' >&2
+            exit 1
+          fi
+      - name: seed cache identity
+        id: seed-key
+        env:
+          SEED: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, os
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('key=data-seed-v1-' + hashlib.sha256(os.environ['SEED'].encode()).hexdigest()[:16] + '-macos27\n')
+          PY
+      - uses: actions/cache/restore@v4
+        id: data-cache
+        with:
+          path: |
+            ${{ env.WORK }}/runtime/data.dbr
+            ${{ env.WORK }}/runtime/inputs.json
+          key: ${{ steps.seed-key.outputs.key }}
+      - name: prepare preserved Data seed
+        env:
+          INIT_DATA: ${{ inputs.init_data }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, urllib.request
+          inputs = json.loads(pathlib.Path(os.environ['GITHUB_EVENT_PATH']).read_text())['inputs']
+          path = pathlib.Path(os.environ['WORK']) / 'runtime/data.dbr'
+          url, digest = inputs.get('data_seed_url', ''), inputs.get('data_seed_sha256', '').lower()
+          if url:
+              print('::add-mask::' + url)
+              if not url.startswith('https://') or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+                  raise SystemExit('A seed URL requires HTTPS and its SHA-256')
+              with urllib.request.urlopen(url, timeout=120) as source:
+                  data = source.read(512 * 1024 * 1024 + 1)
+              if len(data) > 512 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != digest:
+                  raise SystemExit('Seed size or SHA-256 mismatch')
+              if path.exists() and path.read_bytes() != data:
+                  raise SystemExit('Saved seed differs; preserve and inspect it instead of replacing this installation')
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_bytes(data)
+          if not path.is_file() and os.environ['INIT_DATA'] != 'true':
+              raise SystemExit('No saved seed. Supply the ORIGINAL seed for an existing installation, or select init_data for a FIRST installation')
+          PY
+      - name: package
+        working-directory: device
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SKIP_SETUP: ${{ inputs.skip_setup }}
+          MACOS_USER: ${{ secrets.MACOS_USER }}
+        run: |
+          log="$RUNNER_TEMP/package.log"
+          if scripts/package.sh --os "$OS_PROFILE" --uefi ../uefi-sheng 2>&1 | tee "$log"; then
+            exit 0
+          fi
+          # A first installation stops at the runtime step with the command that creates the macOS Data seed as root
+          # (UniXNU scripts/unixnu/runtime.py). Run it once, then package again with the sources already fetched.
+          cmd=$(grep -m1 -E '^[[:space:]]*sudo python3 .*make-macos-data-seed\.py ' "$log" | sed -E 's/^[[:space:]]*sudo //') || true
+          if [ -z "$cmd" ]; then
+            echo "packaging failed" >&2
+            exit 1
+          fi
+          read -r -a seed_args <<< "$cmd"
+          # sudo resets PATH; keep the runner's Python 3 (the system one is too old for the build scripts).
+          seed_args[0]=$(command -v python3)
+          if [ "$SKIP_SETUP" = true ]; then seed_args+=(--skip-setup); fi
+          if [ -n "$MACOS_USER" ]; then seed_args+=(--user "$MACOS_USER"); fi
+          echo "creating the first-install Data seed"
+          sudo "${seed_args[@]}"
+          sudo chown -R "$(id -u):$(id -g)" "../$WORK/runtime"
+          scripts/package.sh --os "$OS_PROFILE" --uefi ../uefi-sheng --no-deps
+      - uses: actions/cache/save@v4
+        if: always() && steps.data-cache.outputs.cache-hit != 'true' && hashFiles(format('{0}/runtime/data.dbr', env.WORK)) != ''
+        with:
+          path: |
+            ${{ env.WORK }}/runtime/data.dbr
+            ${{ env.WORK }}/runtime/inputs.json
+          key: ${{ steps.seed-key.outputs.key }}
+      - name: installation seed backup
+        if: always() && hashFiles(format('{0}/runtime/data.dbr', env.WORK)) != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: installation-seed-macos27
+          retention-days: 1
+          path: |
+            ${{ env.WORK }}/runtime/data.dbr
+            ${{ env.WORK }}/runtime/inputs.json
+      - name: images
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-macos27
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            ${{ env.WORK }}/boot/boot.img
+            ${{ env.WORK }}/payload/payload.img
+            ${{ env.WORK }}/kernel/kernel.macho
+            ${{ env.WORK }}/package.manifest.json
+      - name: remove proprietary inputs
+        if: always()
+        run: rm -rf UniXNU/out/ipsw UniXNU/out/feeds device/.cache/firmware
+
+  userdata:
+    if: inputs.userdata
+    runs-on: macos-26
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: device
+      - uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: ${{ env.UNIXNU_REF }}
+          path: UniXNU
+          submodules: recursive
+      - name: disk space
+        run: |
+          rm -rf "$HOME/Library/Android" || true
+          df -h "$GITHUB_WORKSPACE"
+      - name: tools
+        run: |
+          brew install blacktop/tap/ipsw
+          for t in aea ipsw hdiutil; do command -v "$t" >/dev/null || { echo "missing tool: $t"; exit 1; }; done
+      - name: userdata image
+        working-directory: UniXNU
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          ./unixnu build userdata -D ../device --os "$OS_PROFILE" --dry-run
+          ./unixnu build userdata -D ../device --os "$OS_PROFILE"
+          # The decrypted and encrypted disk images are no longer needed; free their space before the upload.
+          rm -rf out/ipsw
+          df -h "$GITHUB_WORKSPACE"
+          cat "../$WORK/userdata/userdata-root.json"
+      - name: userdata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: userdata-macos27
+          retention-days: 1
+          compression-level: 1
+          if-no-files-found: error
+          path: |
+            ${{ env.WORK }}/userdata/userdata-root.img
+            ${{ env.WORK }}/userdata/userdata-root.json
+      - name: remove proprietary inputs
+        if: always()
+        run: rm -rf UniXNU/out
