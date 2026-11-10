@@ -32,12 +32,12 @@ on:
       boot_runner:
         description: "Runner for the boot job (macos-15-intel avoids macOS arm64 queue contention)"
         type: choice
-        options: ["macos-15-intel", "macos-26", "macos-15", "macos-14", "macos-latest"]
+        options: ["macos-15-intel", "macos-26", "macos-15", "macos-14", "macos-latest", "self-hosted"]
         default: "macos-15-intel"
       userdata_runner:
         description: "Runner for the userdata job (macos-15-intel avoids macOS arm64 queue contention)"
         type: choice
-        options: ["macos-15-intel", "macos-26", "macos-15", "macos-14", "macos-latest"]
+        options: ["macos-15-intel", "macos-26", "macos-15", "macos-14", "macos-latest", "self-hosted"]
         default: "macos-15-intel"
       data_seed_url:
         description: "Optional original data.dbr URL for an existing installation; otherwise use the saved cache"
@@ -102,7 +102,10 @@ jobs:
           if ! xcodebuild -version | grep -q '^Xcode 26'; then
             echo "CCC_OVERRIDE_OPTIONS=# +-Wno-unknown-warning-option +-Wno-error=unknown-warning-option +-Wno-missing-designated-field-initializers +-Wno-unused-but-set-global" >> "$GITHUB_ENV"
           fi
-          brew install dtc llvm lld cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup blacktop/tap/ipsw
+          brew tap blacktop/tap
+          brew trust blacktop/tap || true
+          brew install dtc llvm lld cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup
+          brew install --formula blacktop/tap/ipsw
           {
             echo "$HOME/.cargo/bin"
             echo "/opt/homebrew/opt/llvm/bin"
@@ -247,7 +250,9 @@ jobs:
           df -h "$GITHUB_WORKSPACE"
       - name: tools
         run: |
-          brew install blacktop/tap/ipsw
+          brew tap blacktop/tap
+          brew trust blacktop/tap || true
+          brew install --formula blacktop/tap/ipsw
           for t in aea ipsw hdiutil; do command -v "$t" >/dev/null || { echo "missing tool: $t"; exit 1; }; done
       - name: userdata image
         working-directory: UniXNU
