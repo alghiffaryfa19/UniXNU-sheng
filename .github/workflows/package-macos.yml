@@ -205,17 +205,12 @@ jobs:
               print(f'staged {target} ({len(data)} bytes)')
           PY
           python3 - <<'PY'
-          import json, pathlib, subprocess
-          root = pathlib.Path('drivers/Ath12kWifi')
-          lock = json.loads((root / 'tools/source-lock.json').read_text())
-          for name in ('linux', 'freebsd'):
-              d = root / 'deps' / name
-              if not (d / '.git').exists():
-                  d.parent.mkdir(parents=True, exist_ok=True)
-                  subprocess.run(['git', 'clone', '--filter=blob:none', '--no-checkout', '--sparse', lock[name]['repo'], str(d)], check=True)
-              subprocess.run(['git', '-C', str(d), 'sparse-checkout', 'set', '--no-cone', '/.unixnu-placeholder'], check=True)
+          import pathlib
+          p = pathlib.Path('drivers/Ath12kWifi/tools/fetch-sources.py')
+          p.write_text(p.read_text().replace('"sparse-checkout", "add"', '"sparse-checkout", "set", "--no-cone"'))
           PY
           python3 drivers/Ath12kWifi/tools/fetch-sources.py
+          git -C drivers/Ath12kWifi checkout -- tools/fetch-sources.py
           python3 - <<'PY'
           import contextlib, hashlib, json, os, pathlib, re, struct, subprocess, sys, tempfile, uuid
           pdir = pathlib.Path('scripts/policies/macos-27.3-26C5035r')
