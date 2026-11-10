@@ -29,6 +29,16 @@ on:
         description: "Also build userdata-root.img (about 16.5 GB, needed for the first installation)"
         type: boolean
         default: true
+      boot_runner:
+        description: "Runner for the boot job"
+        type: choice
+        options: ["macos-26", "macos-latest", "macos-15"]
+        default: "macos-26"
+      userdata_runner:
+        description: "Runner for the userdata job (macos-15 avoids competing for macos-26 capacity)"
+        type: choice
+        options: ["macos-15", "macos-26", "macos-15-intel", "macos-latest"]
+        default: "macos-15"
       data_seed_url:
         description: "Optional original data.dbr URL for an existing installation; otherwise use the saved cache"
         type: string
@@ -58,7 +68,7 @@ defaults:
 
 jobs:
   boot:
-    runs-on: macos-26
+    runs-on: ${{ inputs.boot_runner }}
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
@@ -211,7 +221,7 @@ jobs:
 
   userdata:
     if: inputs.userdata
-    runs-on: macos-26
+    runs-on: ${{ inputs.userdata_runner }}
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
