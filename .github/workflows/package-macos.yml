@@ -179,6 +179,11 @@ jobs:
           if not path.is_file() and os.environ['INIT_DATA'] != 'true':
               raise SystemExit('No saved seed. Supply the ORIGINAL seed for an existing installation, or select init_data for a FIRST installation')
           PY
+      - uses: actions/cache/restore@v4
+        id: policy-cache
+        with:
+          path: device/scripts/policies/macos-27.3-26C5035r
+          key: verified-root-policies-v1-macos-27.3-26C5035r
       - name: board firmware and Wi-Fi inputs
         working-directory: device
         run: |
@@ -199,7 +204,94 @@ jobs:
               target.write_bytes(data)
               print(f'staged {target} ({len(data)} bytes)')
           PY
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          root = pathlib.Path('drivers/Ath12kWifi')
+          lock = json.loads((root / 'tools/source-lock.json').read_text())
+          for name in ('linux', 'freebsd'):
+              d = root / 'deps' / name
+              if not (d / '.git').exists():
+                  d.parent.mkdir(parents=True, exist_ok=True)
+                  subprocess.run(['git', 'clone', '--filter=blob:none', '--no-checkout', '--sparse', lock[name]['repo'], str(d)], check=True)
+              subprocess.run(['git', '-C', str(d), 'sparse-checkout', 'set', '--no-cone', '/.unixnu-placeholder'], check=True)
+          PY
           python3 drivers/Ath12kWifi/tools/fetch-sources.py
+          python3 - <<'PY'
+          import contextlib, hashlib, json, os, pathlib, re, struct, subprocess, sys, tempfile, uuid
+          pdir = pathlib.Path('scripts/policies/macos-27.3-26C5035r')
+          names = ('App', 'SystemOS', 'OS')
+          if all((pdir / n / 'manifest.header.bin').is_file() and (pdir / n / 'trusted-key.bin').is_file() for n in names):
+              print('VerifiedRoot policy headers already present')
+              raise SystemExit(0)
+          sys.path.insert(0, str(pathlib.Path('../UniXNU/scripts').resolve()))
+          from unixnu.context import Context
+          from unixnu.ipsw import Ipsw
+          from unixnu import userdata
+          with tempfile.TemporaryDirectory() as td:
+              td = pathlib.Path(td)
+              priv, pub = td / 'priv.pem', td / 'pub.pem'
+              subprocess.run(['openssl', 'genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:3072', '-pkeyopt', 'rsa_keygen_pubexp:65537', '-out', str(priv)], check=True)
+              subprocess.run(['openssl', 'rsa', '-in', str(priv), '-pubout', '-out', str(pub)], check=True)
+              line = subprocess.check_output(['openssl', 'rsa', '-pubin', '-in', str(pub), '-modulus', '-noout'], text=True)
+              modulus = bytes.fromhex(line.strip().split('=', 1)[1])
+              if len(modulus) != 384 or not (modulus[0] & 0x80) or not (modulus[-1] & 1):
+                  raise SystemExit('Invalid RSA-3072 modulus')
+              anchor = b'VROOTKEY' + modulus + b'\x01\x00\x01'
+              anchor_sha = hashlib.sha256(anchor).digest()
+              ctx = Context(repo=pathlib.Path('../UniXNU').resolve(), device=pathlib.Path('.').resolve(), os_profile=os.environ['OS_PROFILE'])
+              src = Ipsw(ctx)
+              comps = {'OS': 'OS', 'SystemOS': 'SystemOS', 'App': 'AppOS'}
+              for name in names:
+                  vpath = pdir / name / 'verification.json'
+                  ver = json.loads(vpath.read_text())
+                  dmg = src.disk_image(comps[name])
+                  for aea in dmg.parent.glob('*.aea'):
+                      aea.unlink(missing_ok=True)
+                  size = userdata.image_size(dmg)
+                  if size != ver['image_bytes']:
+                      raise SystemExit(f'{name}: size {size} != {ver["image_bytes"]}')
+                  img_h, tbl_h = hashlib.sha256(), hashlib.sha256()
+                  count = 0
+                  buf = bytearray()
+                  with contextlib.closing(userdata.disk_blocks(dmg, size)) as blocks:
+                      for chunk in blocks:
+                          img_h.update(chunk)
+                          buf.extend(chunk)
+                          mv = memoryview(buf)
+                          full = (len(mv) // 4096) * 4096
+                          for off in range(0, full, 4096):
+                              tbl_h.update(hashlib.sha256(mv[off:off + 4096]).digest())
+                              count += 1
+                          del mv
+                          if full:
+                              del buf[:full]
+                  if buf:
+                      tbl_h.update(hashlib.sha256(buf).digest())
+                      count += 1
+                  if name != 'OS':
+                      dmg.unlink(missing_ok=True)
+                  if img_h.hexdigest() != ver['image_sha256'] or count != ver['blocks_verified']:
+                      raise SystemExit(f'{name}: image sha256 or block count mismatch')
+                  hdr = struct.pack('<8s4I2Q16s32s32s32sQ', b'VROOT01\0', 1, 160, 4096, 0,
+                                    size, count, uuid.UUID(ver['volume_uuid']).bytes,
+                                    img_h.digest(), tbl_h.digest(), anchor_sha, ver['generation'])
+                  hbin, sbin = td / f'{name}.hdr', td / f'{name}.sig'
+                  hbin.write_bytes(hdr)
+                  subprocess.run(['openssl', 'dgst', '-sha256', '-sign', str(priv), '-out', str(sbin), str(hbin)], check=True)
+                  sig = sbin.read_bytes()
+                  if len(sig) != 384:
+                      raise SystemExit(f'{name}: unexpected signature size {len(sig)}')
+                  (pdir / name / 'manifest.header.bin').write_bytes(hdr + sig)
+                  (pdir / name / 'trusted-key.bin').write_bytes(anchor)
+                  ver['trusted_key_sha256'] = anchor_sha.hex()
+                  vpath.write_text(json.dumps(ver, indent=2) + '\n')
+                  print(f'generated VerifiedRoot header for {name} (table_sha256={tbl_h.hexdigest()})')
+          PY
+      - uses: actions/cache/save@v4
+        if: steps.policy-cache.outputs.cache-hit != 'true'
+        with:
+          path: device/scripts/policies/macos-27.3-26C5035r
+          key: verified-root-policies-v1-macos-27.3-26C5035r
       - name: package
         working-directory: device
         env:
@@ -255,6 +347,7 @@ jobs:
             ${{ env.WORK }}/payload/payload.img
             ${{ env.WORK }}/kernel/kernel.macho
             ${{ env.WORK }}/package.manifest.json
+            device/scripts/policies/macos-27.3-26C5035r
       - name: remove proprietary inputs
         if: always()
         run: rm -rf UniXNU/out/ipsw UniXNU/out/feeds device/.cache/firmware device/firmware/wcn7850/*.bin
@@ -292,6 +385,7 @@ jobs:
           ./unixnu build userdata -D ../device --os "$OS_PROFILE"
           # The decrypted and encrypted disk images are no longer needed; free their space before the upload.
           rm -rf out/ipsw
+          python3 ../device/scripts/add-userdata-vroot.py "../$WORK/userdata/userdata-root.img"
           df -h "$GITHUB_WORKSPACE"
           cat "../$WORK/userdata/userdata-root.json"
       - name: userdata artifact
