@@ -57,7 +57,7 @@ env:
   OS_PROFILE: macos-27.3-26C5035r
   # out/<board>/<os profile>/<defconfig without _defconfig>, from board.toml [package.defconfig].
   WORK: UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos
-  UNIXNU_REF: 82522c4e12a5f32e0b64abd515d4fcd1aaea40c0
+  UNIXNU_REF: 3fd6a3cf0e6f2eba5d3de3a4d1912e2db23a0fc4
   HOMEBREW_NO_AUTO_UPDATE: 1
   HOMEBREW_NO_INSTALL_CLEANUP: 1
 
