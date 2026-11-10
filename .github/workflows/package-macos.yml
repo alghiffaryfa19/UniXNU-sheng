@@ -30,15 +30,15 @@ on:
         type: boolean
         default: true
       boot_runner:
-        description: "Runner for the boot job"
+        description: "Runner for the boot job (macos-15-intel avoids macOS arm64 queue contention)"
         type: choice
-        options: ["macos-26", "macos-latest", "macos-15"]
-        default: "macos-26"
+        options: ["macos-15-intel", "macos-26", "macos-15", "macos-14", "macos-latest"]
+        default: "macos-15-intel"
       userdata_runner:
-        description: "Runner for the userdata job (macos-15 avoids competing for macos-26 capacity)"
+        description: "Runner for the userdata job (macos-15-intel avoids macOS arm64 queue contention)"
         type: choice
-        options: ["macos-15", "macos-26", "macos-15-intel", "macos-latest"]
-        default: "macos-15"
+        options: ["macos-15-intel", "macos-26", "macos-15", "macos-14", "macos-latest"]
+        default: "macos-15-intel"
       data_seed_url:
         description: "Optional original data.dbr URL for an existing installation; otherwise use the saved cache"
         type: string
@@ -94,6 +94,14 @@ jobs:
           df -h "$GITHUB_WORKSPACE"
       - name: tools
         run: |
+          brew_prefix=$(brew --prefix)
+          if [ ! -e /opt/homebrew ] && [ "$brew_prefix" != "/opt/homebrew" ]; then
+            sudo mkdir -p /opt
+            sudo ln -s "$brew_prefix" /opt/homebrew
+          fi
+          if ! xcodebuild -version | grep -q '^Xcode 26'; then
+            echo "CCC_OVERRIDE_OPTIONS=# +-Wno-unknown-warning-option +-Wno-error=unknown-warning-option +-Wno-missing-designated-field-initializers +-Wno-unused-but-set-global" >> "$GITHUB_ENV"
+          fi
           brew install dtc llvm lld cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup blacktop/tap/ipsw
           {
             echo "$HOME/.cargo/bin"
