@@ -26,9 +26,9 @@ on:
         type: boolean
         default: false
       userdata:
-        description: "Also build userdata-root.img (about 16.5 GB, needed for the first installation)"
+        description: "Also build userdata-root.img (about 16.5 GB, needed once for the first installation)"
         type: boolean
-        default: true
+        default: false
       boot_runner:
         description: "Runner for the boot job (macos-15-intel avoids macOS arm64 queue contention)"
         type: choice
@@ -106,16 +106,20 @@ jobs:
           brew trust blacktop/tap || true
           brew install dtc llvm lld cmake mtools ninja glslang shaderc spirv-tools bison pkgconf rustup
           brew install --formula blacktop/tap/ipsw
+          export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:/opt/homebrew/opt/llvm/bin:/opt/homebrew/opt/lld/bin:/opt/homebrew/opt/bison/bin:$PATH"
           {
+            echo "/opt/homebrew/opt/rustup/bin"
             echo "$HOME/.cargo/bin"
             echo "/opt/homebrew/opt/llvm/bin"
             echo "/opt/homebrew/opt/lld/bin"
             echo "/opt/homebrew/opt/bison/bin"
           } >> "$GITHUB_PATH"
           rustup toolchain install 1.98.0 --profile minimal --component rust-src
+          rustup default 1.98.0
+          cargo +1.98.0 --version
           ok=1
           for t in clang xcodebuild make git ninja cmake dtc fdtget fdtput aea compression_tool \
-                   mformat mcopy ipsw hdiutil; do
+                   mformat mcopy ipsw hdiutil cargo rustc; do
             command -v "$t" >/dev/null || { echo "missing tool: $t"; ok=0; }
           done
           for t in lld-link llvm-lib llvm-rc llvm-nm llvm-objcopy; do
@@ -137,8 +141,10 @@ jobs:
         run: |
           python3 - <<'PY'
           import hashlib, os
+          h = hashlib.sha256(os.environ['SEED'].encode()).hexdigest()[:16]
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              out.write('key=data-seed-v1-' + hashlib.sha256(os.environ['SEED'].encode()).hexdigest()[:16] + '-macos27\n')
+              out.write(f'key=data-seed-v2-{h}-macos27\n')
+              out.write(f'restore=data-seed-v1-{h}-macos27\n')
           PY
       - uses: actions/cache/restore@v4
         id: data-cache
@@ -147,6 +153,8 @@ jobs:
             ${{ env.WORK }}/runtime/data.dbr
             ${{ env.WORK }}/runtime/inputs.json
           key: ${{ steps.seed-key.outputs.key }}
+          restore-keys: |
+            ${{ steps.seed-key.outputs.restore }}
       - name: prepare preserved Data seed
         env:
           INIT_DATA: ${{ inputs.init_data }}
@@ -200,7 +208,7 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "../$WORK/runtime"
           scripts/package.sh --os "$OS_PROFILE" --uefi ../uefi-sheng --no-deps
       - uses: actions/cache/save@v4
-        if: always() && steps.data-cache.outputs.cache-hit != 'true' && hashFiles(format('{0}/runtime/data.dbr', env.WORK)) != ''
+        if: always() && steps.data-cache.outputs.cache-hit != 'true' && hashFiles(format('{0}/runtime/inputs.json', env.WORK)) != ''
         with:
           path: |
             ${{ env.WORK }}/runtime/data.dbr
