@@ -179,6 +179,27 @@ jobs:
           if not path.is_file() and os.environ['INIT_DATA'] != 'true':
               raise SystemExit('No saved seed. Supply the ORIGINAL seed for an existing installation, or select init_data for a FIRST installation')
           PY
+      - name: board firmware and Wi-Fi inputs
+        working-directory: device
+        run: |
+          python3 scripts/extract-files.py
+          python3 - <<'PY'
+          import hashlib, json, pathlib, urllib.request
+          wcn = pathlib.Path('firmware/wcn7850')
+          manifest = json.loads((wcn / 'manifest.json').read_text())['files']
+          base = 'https://raw.githubusercontent.com/ianchb/sheng-firmware/ebdd6f89ee5aaa132f03860c211bdfb4294bd954/ath12k/WCN7850/hw2.0/'
+          for name, expected in manifest.items():
+              target = wcn / name
+              if target.is_file() and target.stat().st_size == expected['bytes'] and hashlib.sha256(target.read_bytes()).hexdigest() == expected['sha256']:
+                  continue
+              with urllib.request.urlopen(base + name, timeout=60) as resp:
+                  data = resp.read()
+              if len(data) != expected['bytes'] or hashlib.sha256(data).hexdigest() != expected['sha256']:
+                  raise SystemExit(f'WCN7850 firmware hash mismatch: {name}')
+              target.write_bytes(data)
+              print(f'staged {target} ({len(data)} bytes)')
+          PY
+          python3 drivers/Ath12kWifi/tools/fetch-sources.py
       - name: package
         working-directory: device
         env:
@@ -236,7 +257,7 @@ jobs:
             ${{ env.WORK }}/package.manifest.json
       - name: remove proprietary inputs
         if: always()
-        run: rm -rf UniXNU/out/ipsw UniXNU/out/feeds device/.cache/firmware
+        run: rm -rf UniXNU/out/ipsw UniXNU/out/feeds device/.cache/firmware device/firmware/wcn7850/*.bin
 
   userdata:
     if: inputs.userdata
