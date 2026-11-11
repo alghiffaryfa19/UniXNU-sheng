@@ -212,16 +212,16 @@ jobs:
           python3 drivers/Ath12kWifi/tools/fetch-sources.py
           git -C drivers/Ath12kWifi checkout -- tools/fetch-sources.py
           python3 - <<'PY'
-          import contextlib, hashlib, json, os, pathlib, re, struct, subprocess, sys, tempfile, uuid
+          import contextlib, hashlib, json, os, pathlib, re, struct, subprocess, sys, tempfile, tomllib, types, uuid
           pdir = pathlib.Path('scripts/policies/macos-27.3-26C5035r')
           names = ('App', 'SystemOS', 'OS')
           if all((pdir / n / 'manifest.header.bin').is_file() and (pdir / n / 'trusted-key.bin').is_file() for n in names):
               print('VerifiedRoot policy headers already present')
               raise SystemExit(0)
           sys.path.insert(0, str(pathlib.Path('../UniXNU/scripts').resolve()))
-          from unixnu.context import Context
           from unixnu.ipsw import Ipsw
           from unixnu import userdata
+          profile = tomllib.loads((pathlib.Path('../UniXNU/profiles/os') / os.environ['OS_PROFILE'] / 'profile.toml').read_text())
           with tempfile.TemporaryDirectory() as td:
               td = pathlib.Path(td)
               priv, pub = td / 'priv.pem', td / 'pub.pem'
@@ -233,9 +233,9 @@ jobs:
                   raise SystemExit('Invalid RSA-3072 modulus')
               anchor = b'VROOTKEY' + modulus + b'\x01\x00\x01'
               anchor_sha = hashlib.sha256(anchor).digest()
-              ctx = Context(repo=pathlib.Path('../UniXNU').resolve(), device=pathlib.Path('.').resolve(), os_profile=os.environ['OS_PROFILE'])
+              ctx = types.SimpleNamespace(board=profile, out_root=pathlib.Path('../UniXNU/out').resolve(), option_text=lambda *_: None)
               src = Ipsw(ctx)
-              comps = {'OS': 'OS', 'SystemOS': 'SystemOS', 'App': 'AppOS'}
+              comps = {w['name']: w['component'] for w in profile['userdata']['windows']}
               for name in names:
                   vpath = pdir / name / 'verification.json'
                   ver = json.loads(vpath.read_text())
