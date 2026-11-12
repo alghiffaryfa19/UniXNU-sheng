@@ -304,6 +304,13 @@ jobs:
           cmd=$(grep -m1 -E '^[[:space:]]*sudo python3 .*make-macos-data-seed\.py ' "$log" | sed -E 's/^[[:space:]]*sudo //') || true
           if [ -z "$cmd" ]; then
             echo "packaging failed" >&2
+            echo "=== Diagnostic Logs from ../$WORK/logs ===" >&2
+            for l in "../$WORK"/logs/*.log; do
+              if [ -f "$l" ]; then
+                echo "--- Tail of $l ---" >&2
+                tail -n 60 "$l" >&2
+              fi
+            done
             exit 1
           fi
           read -r -a seed_args <<< "$cmd"
