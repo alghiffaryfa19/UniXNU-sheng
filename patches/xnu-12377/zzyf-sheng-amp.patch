@@ -1,5 +1,5 @@
 diff --git a/osfmk/kern/sched_clutch.c b/osfmk/kern/sched_clutch.c
-index 768efa7f..b27d2913 100644
+index 768efa7..59b3830 100644
 --- a/osfmk/kern/sched_clutch.c
 +++ b/osfmk/kern/sched_clutch.c
 @@ -1379,6 +1379,39 @@ sched_clutch_bucket_init(
@@ -68,7 +68,82 @@ index 768efa7f..b27d2913 100644
  }
  
  static pset_id_t
-@@ -6359,8 +6401,8 @@ sched_edge_cpu_init_completed(void)
+@@ -5018,6 +5060,33 @@ sched_edge_shared_rsrc_migrate_possible(thread_t thread, processor_set_t preferr
+  * happens at quantum expiration, which should allow cheaper
+  * operations at other callsites to win the race.
+  */
++static cpumap_t sched_edge_p_core_map = 0ULL;
++static cpumap_t sched_edge_non_p_core_map = 0ULL;
++
++#if OS_ATOMIC_USE_LLSC
++/*
++ * sheng: the BCM2837 machine configuration targets baseline ARM64 without ARMv8.2-A atomics,
++ * where os_atomic_rmw_loop uses LL/SC and cannot operate on 128-bit registry state.
++ * Stir-the-pot is not used on this asymmetric topology (UI threads stay on P cores).
++ */
++static inline int
++sched_edge_stir_the_pot_try_trigger_swap(thread_t thread)
++{
++	(void)thread;
++	return -1;
++}
++
++void
++sched_edge_stir_the_pot_clear_registry_entry(void)
++{
++}
++
++static inline void
++sched_edge_stir_the_pot_set_registry_entry(bool override_pending_state)
++{
++	(void)override_pending_state;
++}
++#else /* !OS_ATOMIC_USE_LLSC */
+ typedef unsigned __int128 sched_edge_stp_registry_t;
+ _Atomic sched_edge_stp_registry_t sched_edge_stir_the_pot_global_registry = 0LL;
+ #define SESTP_BITS_PER_CORE (2)
+@@ -5038,13 +5107,6 @@ __enum_decl(sched_edge_stp_state_t, uint8_t, {
+ static_assert(SCHED_EDGE_STP_MAX <= bits_mask(SESTP_BITS_PER_CORE),
+     "Per-core stir-the-pot request state must fit in per-core bits");
+ 
+-#if OS_ATOMIC_USE_LLSC
+-#error "Expecting CAS implementation of os_atomic_rmw_loop()"
+-#endif /* OS_ATOMIC_USE_LLSC */
+-
+-static cpumap_t sched_edge_p_core_map = 0ULL;
+-static cpumap_t sched_edge_non_p_core_map = 0ULL;
+-
+ /*
+  * In order to reduce the chance of picking the same CPUs over
+  * and over unfairly for stir-the-pot swaps, use an offset value
+@@ -5273,6 +5335,7 @@ sched_edge_stir_the_pot_set_registry_entry(bool override_pending_state)
+ 		    3, self_cpu, self_state, 0);
+ 	}
+ }
++#endif /* !OS_ATOMIC_USE_LLSC */
+ 
+ /* Stir-the-pot is designed for sharing time on the P-cores */
+ static inline bool
+@@ -5301,6 +5364,10 @@ sched_edge_thread_eligible_for_rebalance(thread_t thread)
+ static inline bool
+ sched_edge_stir_the_pot_thread_eligible(thread_t thread)
+ {
++#if OS_ATOMIC_USE_LLSC
++	(void)thread;
++	return false;
++#else /* !OS_ATOMIC_USE_LLSC */
+ 	processor_set_t preferred_pset;
+ 	if ((thread == THREAD_NULL) ||
+ 	    ((preferred_pset = pset_array[sched_edge_thread_preferred_pset(thread)]) == PROCESSOR_SET_NULL)) {
+@@ -5317,6 +5384,7 @@ sched_edge_stir_the_pot_thread_eligible(thread_t thread)
+ 	    thread->th_expired_quantum_on_higher_core :
+ 	    thread->th_expired_quantum_on_lower_core;
+ 	return right_kind_of_thread && ready_for_swap;
++#endif /* !OS_ATOMIC_USE_LLSC */
+ }
+ 
+ /*
+@@ -6359,8 +6427,8 @@ sched_edge_cpu_init_completed(void)
  	edge_config_defaults[PSET_AMP_E][PSET_AMP_E] = free_spill;
  	/* P -> E */
  	edge_config_defaults[PSET_AMP_P][PSET_AMP_E] = weighted_spill;
@@ -79,7 +154,7 @@ index 768efa7f..b27d2913 100644
  #if HAS_MCORE
  	/* M -> M */
  	edge_config_defaults[PSET_AMP_M][PSET_AMP_M] = free_spill;
-@@ -6444,6 +6486,9 @@ sched_edge_cpu_init_completed(void)
+@@ -6444,6 +6512,9 @@ sched_edge_cpu_init_completed(void)
  				 * values when deciding to enforce performance islands for certain buckets.
  				 */
  #endif /* CONFIG_SCHED_PERF_ISLANDS */
