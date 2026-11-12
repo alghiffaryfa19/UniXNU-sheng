@@ -57,7 +57,7 @@ env:
   OS_PROFILE: macos-27.3-26C5035r
   # out/<board>/<os profile>/<defconfig without _defconfig>, from board.toml [package.defconfig].
   WORK: UniXNU/out/sheng/macos-27.3-26C5035r/sheng_macos
-  UNIXNU_REF: 4f3ff5c50cbab63f28d66c7a9e8f3108ceeb960d
+  UNIXNU_REF: 2bbb39d5e305e7514a6e300951c142b7405f635f
   HOMEBREW_NO_AUTO_UPDATE: 1
   HOMEBREW_NO_INSTALL_CLEANUP: 1
 
@@ -307,8 +307,10 @@ jobs:
             echo "=== Diagnostic Logs from ../$WORK/logs ===" >&2
             for l in "../$WORK"/logs/*.log; do
               if [ -f "$l" ]; then
-                echo "--- Tail of $l ---" >&2
-                tail -n 60 "$l" >&2
+                echo "--- Errors in $l ---" >&2
+                grep -n -C 5 -E "error:|fatal error:|Error [1-9]|undefined symbol|cannot find" "$l" >&2 || true
+                echo "--- Tail 200 of $l ---" >&2
+                tail -n 200 "$l" >&2
               fi
             done
             exit 1
@@ -322,6 +324,15 @@ jobs:
           sudo "${seed_args[@]}"
           sudo chown -R "$(id -u):$(id -g)" "../$WORK/runtime"
           scripts/package.sh --os "$OS_PROFILE" --uefi ../uefi-sheng --no-deps
+      - name: diagnostic logs backup
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-macos-logs
+          path: |
+            UniXNU/out/**/*.log
+            /Users/runner/work/_temp/*.log
+          if-no-files-found: ignore
       - uses: actions/cache/save@v4
         if: always() && steps.data-cache.outputs.cache-hit != 'true' && hashFiles(format('{0}/runtime/inputs.json', env.WORK)) != ''
         with:
