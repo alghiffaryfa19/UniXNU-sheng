@@ -126,6 +126,11 @@ jobs:
             [ -f "/opt/homebrew/opt/llvm/bin/$t" ] || [ -f "/opt/homebrew/opt/lld/bin/$t" ] || { echo "missing tool: $t"; ok=0; }
           done
           [ "$ok" = 1 ]
+          bridge_script="UniXNU/scripts/build-adreno-metal-bridge.py"
+          [ -f "$bridge_script" ] || bridge_script="../UniXNU/scripts/build-adreno-metal-bridge.py"
+          if [ -f "$bridge_script" ]; then
+            sed -i '' 's/timeout=1800/timeout=3600/g' "$bridge_script"
+          fi
       - name: platform seed
         env:
           seed: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
