@@ -193,6 +193,13 @@ jobs:
         working-directory: device
         run: |
           python3 scripts/extract-files.py
+          for attempt in 1 2 3 4 5 6; do
+            python3 scripts/download-sheng-firmware.py --connections 8 && break
+            if [ "$attempt" -eq 6 ]; then exit 1; fi
+            echo "download-sheng-firmware.py attempt $attempt failed; waiting 10s before resuming..."
+            sleep 10
+          done
+          python3 scripts/extract-sheng-firmware.py --delete-archive
           python3 - <<'PY'
           import hashlib, json, pathlib, urllib.request
           wcn = pathlib.Path('firmware/wcn7850')
