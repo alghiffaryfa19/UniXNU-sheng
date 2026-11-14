@@ -374,12 +374,21 @@ def main():
     def word(va):
         return struct.unpack_from('<I', data, file_offset(va))[0]
 
+    def is_padding(va, size):
+        aligned = (size + 3) & ~3
+        off = file_offset(va)
+        chunk = data[off:off + aligned]
+        return all(
+            chunk[i:i + 4] in (b'\x00\x00\x00\x00', b'\x1f\x20\x03\xd5')
+            for i in range(0, aligned, 4)
+        )
+
     expected = {ENTRY_VA: branch(ENTRY_VA, START_FIRST_CPU), MMU_ENABLE_VA: 0xD5181000, AFTER_MMU_VA: 0xD2A00600}
     for va, value in expected.items():
         if word(va) != value:
             raise SystemExit(f'{va:#x} holds {word(va):#010x}, expected {value:#010x}: not the kernel these probes are for')
     for va in CAVES.values():
-        if any(data[file_offset(va):file_offset(va) + CAVE_SIZE]):
+        if not is_padding(va, CAVE_SIZE):
             raise SystemExit(f'Padding at {va:#x} is not empty')
 
     # (site, cave stage, symbols the cave is linked with)
@@ -412,16 +421,16 @@ def main():
         # up to the end of the zero padding, where the next page of kernel text starts.
         PANIC_CAVE = (max(stage_end.values()) + 15) & ~15
         cave_end = PANIC_CAVE_END
-        while cave_end & 0xFFF and not any(data[file_offset(cave_end):file_offset(cave_end) + 4]):
+        while cave_end & 0xFFF and is_padding(cave_end, 4):
             cave_end += 4
-        if word(PANIC_VA) in (0, 0xFFFFFFFF) or any(data[file_offset(PANIC_CAVE):file_offset(cave_end)]):
+        if word(PANIC_VA) in (0, 0xFFFFFFFF) or not is_padding(PANIC_CAVE, cave_end - PANIC_CAVE):
             raise SystemExit('panic() or the panic screen padding is not as expected')
         with tempfile.TemporaryDirectory() as tmp:
             code, load, entry = assemble_c(ROOT / 'scripts/xnu-panic-screen.c', PANIC_CAVE, Path(tmp), kernel_names)
             common_entry = panic_common_entry(Path(tmp), code, load)
         if load + len(code) > cave_end:
             raise SystemExit(f'panic screen is {len(code):#x} bytes at {load:#x}, the padding ends at {cave_end:#x}')
-        if any(data[file_offset(load):file_offset(load) + len(code)]):
+        if not is_padding(load, len(code)):
             raise SystemExit(f'Padding at {load:#x} is not empty')
         data[file_offset(load):file_offset(load) + len(code)] = code
         struct.pack_into('<I', data, file_offset(PANIC_VA), branch(PANIC_VA, entry))
