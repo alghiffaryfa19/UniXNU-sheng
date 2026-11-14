@@ -47,7 +47,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: package-macos-${{ github.ref }}
@@ -366,6 +366,27 @@ jobs:
             ${{ env.WORK }}/kernel/kernel.macho
             ${{ env.WORK }}/package.manifest.json
             device/scripts/policies/macos-27.3-26C5035r
+      - name: publish boot release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="macos-27.3-latest"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "macOS 27.3 (26C5035r) Latest Build" \
+              --notes $'Automated macOS 27.3 (26C5035r) build.\n\nReassemble `userdata-root.img` from split parts:\n```sh\ncat userdata-root.img.zst.part-* | zstd -d -o userdata-root.img\n```' \
+              --prerelease || true
+          fi
+          tar -C "device/scripts/policies" -czf "$WORK/policies-macos-27.3-26C5035r.tar.gz" macos-27.3-26C5035r
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "$WORK/boot/boot.img" \
+            "$WORK/payload/payload.img" \
+            "$WORK/kernel/kernel.macho" \
+            "$WORK/package.manifest.json" \
+            "$WORK/runtime/data.dbr" \
+            "$WORK/runtime/inputs.json" \
+            "$WORK/policies-macos-27.3-26C5035r.tar.gz"
       - name: remove proprietary inputs
         if: always()
         run: rm -rf UniXNU/out/ipsw UniXNU/out/feeds device/.cache/firmware device/firmware/wcn7850/*.bin
@@ -393,7 +414,8 @@ jobs:
           brew tap blacktop/tap
           brew trust blacktop/tap || true
           brew install --formula blacktop/tap/ipsw
-          for t in aea ipsw hdiutil; do command -v "$t" >/dev/null || { echo "missing tool: $t"; exit 1; }; done
+          command -v zstd >/dev/null || brew install --formula zstd
+          for t in aea ipsw hdiutil zstd gh; do command -v "$t" >/dev/null || { echo "missing tool: $t"; exit 1; }; done
       - name: userdata image
         working-directory: UniXNU
         env:
@@ -406,6 +428,27 @@ jobs:
           python3 ../device/scripts/add-userdata-vroot.py "../$WORK/userdata/userdata-root.img"
           df -h "$GITHUB_WORKSPACE"
           cat "../$WORK/userdata/userdata-root.json"
+      - name: publish userdata release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="macos-27.3-latest"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "macOS 27.3 (26C5035r) Latest Build" \
+              --notes $'Automated macOS 27.3 (26C5035r) build.\n\nReassemble `userdata-root.img` from split parts:\n```sh\ncat userdata-root.img.zst.part-* | zstd -d -o userdata-root.img\n```' \
+              --prerelease || true
+          fi
+          for old_asset in $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name | select(startswith("userdata-root.img.zst.part-"))' || true); do
+            gh release delete-asset "$TAG" "$old_asset" --repo "$GITHUB_REPOSITORY" --yes || true
+          done
+          zstd -1 -T0 -c "$WORK/userdata/userdata-root.img" | split -b 1900m - "$WORK/userdata/userdata-root.img.zst.part-"
+          ls -lh "$WORK/userdata"/userdata-root.img.zst.part-*
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "$WORK/userdata/userdata-root.json" \
+            "$WORK/userdata"/userdata-root.img.zst.part-*
+          rm -f "$WORK/userdata"/userdata-root.img.zst.part-*
       - name: userdata artifact
         uses: actions/upload-artifact@v4
         with:
