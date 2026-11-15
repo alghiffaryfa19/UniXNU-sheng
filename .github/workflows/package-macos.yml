@@ -91,8 +91,7 @@ jobs:
           # 1. Copy BootResetCore.h for ShengBootGuard
           cp device/package/BootResetCore.h uefi-sheng/Platforms/Xiaomi/shengPkg/Include/BootResetCore.h
 
-          # 2. Patch MemoryMapLib.c:
-          # Fix the TrustZone hole at 0xE671D000..0xE7CB0000 (21.58 MiB) so DXE Core does not abort
+          # 2. Patch MemoryMapLib.c and ShengPlatformSecLib
           python3 - <<'PY'
           from pathlib import Path
           mmap = Path('uefi-sheng/Platforms/Xiaomi/shengPkg/Library/MemoryMapLib/MemoryMapLib.c')
@@ -104,6 +103,20 @@ jobs:
           content = content.replace(old_gap, new_gap)
           mmap.write_text(content)
           print("Patched MemoryMapLib.c DRAM gap 0xE7CB0000 and tz-ext-region")
+
+          for f in Path('uefi-sheng').rglob('*'):
+              if f.is_file() and f.suffix in ('.c', '.h'):
+                  txt = f.read_text(errors='ignore')
+                  modified = False
+                  if 'BR_WDT_TIMEOUT_MS' in txt and '#include "BootResetCore.h"' not in txt and f.name.endswith('.h'):
+                      txt = '#include "BootResetCore.h"\n' + txt
+                      modified = True
+                  if 'ShengWatchdogCall (0x84000009' in txt:
+                      txt = txt.replace('ShengWatchdogCall (0x84000009, 0, 0);', '// ShengWatchdogCall (0x84000009, 0, 0);')
+                      modified = True
+                      print(f"Disabled abort-on-error in {f}")
+                  if modified:
+                      f.write_text(txt)
           PY
       - name: disk space
         run: |

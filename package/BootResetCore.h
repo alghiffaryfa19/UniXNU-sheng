@@ -20,8 +20,26 @@ enum {
   BR_STATUS_DONE = 1u << 0, BR_STATUS_ERRORS = 0xeu,      // bits 1..3: failed, denied, dropped
   BR_SDAM_PPID = 0x071, BR_REBOOT_CELL = 0x48,
   BR_REBOOT_MASK = 0xfe, BR_REBOOT_SHIFT = 1, BR_REBOOT_BOOTLOADER = 2,
-  BR_POLLS = 100000
+  BR_POLLS = 100000,
+
+  BR_WDT_CONTROL = 0x86000005u,
+  BR_WDT_STATUS = 0x86000006u,
+  BR_WDT_PING = 0x86000007u,
+  BR_WDT_SET_TIME = 0x86000008u,
+  BR_WDT_ENABLE = 3,
+  BR_WDT_DISABLE = 2,
+  BR_WDT_TIMEOUT_MS = 60000
 };
+
+#ifndef BR_WDT_CONTROL
+#define BR_WDT_CONTROL BR_WDT_CONTROL
+#define BR_WDT_STATUS BR_WDT_STATUS
+#define BR_WDT_PING BR_WDT_PING
+#define BR_WDT_SET_TIME BR_WDT_SET_TIME
+#define BR_WDT_ENABLE BR_WDT_ENABLE
+#define BR_WDT_DISABLE BR_WDT_DISABLE
+#define BR_WDT_TIMEOUT_MS BR_WDT_TIMEOUT_MS
+#endif
 struct br_arbiter {
   volatile uint32_t *core;   // 0x3000 bytes
   volatile uint32_t *cnfg;   // 0x4000 bytes
