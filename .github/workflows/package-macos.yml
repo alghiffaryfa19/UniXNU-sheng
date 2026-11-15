@@ -154,8 +154,8 @@ jobs:
           h = hashlib.sha256(os.environ['SEED'].encode()).hexdigest()[:16]
           rid = os.environ['GITHUB_RUN_ID']
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
-              out.write(f'key=data-seed-v3-{h}-macos27-{rid}\n')
-              out.write(f'restore=data-seed-v3-{h}-macos27-\n')
+              out.write(f'key=data-seed-v4-40g-{h}-macos27-{rid}\n')
+              out.write(f'restore=data-seed-v4-40g-{h}-macos27-\n')
           PY
       - uses: actions/cache/restore@v4
         id: data-cache

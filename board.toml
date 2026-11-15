@@ -10,8 +10,8 @@
 
 
 ["userdata"]
-"first_lba" = 3094592
-"last_lba" = 64007162
+"first_lba" = 3094784
+"last_lba" = 18725631
 "lba_bytes" = 4096
 
 
@@ -267,9 +267,9 @@ CI_ENABLE_METAL_GPU = "0"
 # The macOS seed keeps the Data template's owners, so it is made as root (runtime.py prints the command).
 "data_seed_tool" = "scripts/make-macos-data-seed.py"
 "skip_setup" = false
-# The persistent Data store sits below the 1 GiB log reserve at the end of userdata and must clear the root image
-# (16.4 GiB with OS, SystemOS, App and their .vroot tables). 215 GiB overlapped it by 36 MiB; 210 GiB leaves 5 GiB.
-"data_gib" = 210
+# The persistent Data store sits below the 1 GiB log reserve at the end of userdata (59.63 GiB on the dual-boot
+# userdata+linux layout) and must clear the 16.4 GiB root image (OS, SystemOS, App and their .vroot tables). 40 GiB leaves ~2.2 GiB.
+"data_gib" = 40
 # The owner apfs_boot_util for the read-only root container (launchd mount-phase-1/2), with apfs-boot-shim=1.
 "boot_shims" = true
 # The audio server plug-in as a macOS driver bundle in /Library/Audio/Plug-Ins/HAL (Library/ files of the addon).
