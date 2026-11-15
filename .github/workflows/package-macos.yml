@@ -86,6 +86,25 @@ jobs:
           repository: UniXNU/uefi-sheng
           path: uefi-sheng
           submodules: recursive
+      - name: patch uefi-sheng memory map and boot guard
+        run: |
+          # 1. Copy BootResetCore.h for ShengBootGuard
+          cp device/package/BootResetCore.h uefi-sheng/Platforms/Xiaomi/shengPkg/Include/BootResetCore.h
+
+          # 2. Patch MemoryMapLib.c:
+          # Fix the TrustZone hole at 0xE671D000..0xE7CB0000 (21.58 MiB) so DXE Core does not abort
+          python3 - <<'PY'
+          from pathlib import Path
+          mmap = Path('uefi-sheng/Platforms/Xiaomi/shengPkg/Library/MemoryMapLib/MemoryMapLib.c')
+          content = mmap.read_text()
+          old_gap = '{"DRAM gap 0xE671D000", 0xE671D000, 0x190E3000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},'
+          new_gap = '{"tz-ext-region@e671d000", 0xE671D000, 0x01593000, HobOnlyNoCacheSetting, MEM_RES, UNCACHEABLE, Reserv, UNCACHED_UNBUFFERED_XN},\n  {"DRAM gap 0xE7CB0000", 0xE7CB0000, 0x17B50000, AddMem, SYS_MEM, SYS_MEM_CAP, Conv, WRITE_BACK_XN},'
+          if old_gap not in content:
+              raise SystemExit("MemoryMapLib.c target pattern not found")
+          content = content.replace(old_gap, new_gap)
+          mmap.write_text(content)
+          print("Patched MemoryMapLib.c DRAM gap 0xE7CB0000 and tz-ext-region")
+          PY
       - name: disk space
         run: |
           df -h "$GITHUB_WORKSPACE"
