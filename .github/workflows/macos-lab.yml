@@ -17,7 +17,7 @@ on:
         default: sheng-macos27-kernel-v1-d509f7e4757a27f5-43684813634
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: macos-lab-${{ github.ref }}-${{ inputs.export_build_inputs && 'inputs' || 'images' }}
@@ -196,6 +196,36 @@ jobs:
           path: artifacts/
           compression-level: 0
           retention-days: 1
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="macos-27.3-latest"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "macOS 27.3 (26C5035r) Latest Build" \
+              --notes $'Automated macOS 27.3 (26C5035r) build.\n\nReassemble `userdata-root.img` from split parts:\n```sh\ncat userdata-root.img.zst.part-* | zstd -d -o userdata-root.img\n```' \
+              --prerelease || true
+          fi
+          mkdir -p release-assets
+          for f in artifacts/*; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f")
+            if [ "$base" = "userdata-root.img.zst" ]; then
+              split -b 1900m "$f" "release-assets/userdata-root.img.zst.part-"
+            else
+              cp "$f" "release-assets/$base"
+            fi
+          done
+          if ls release-assets/userdata-root.img.zst.part-* >/dev/null 2>&1; then
+            for old_asset in $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name | select(startswith("userdata-root.img.zst.part-"))' || true); do
+              gh release delete-asset "$TAG" "$old_asset" --repo "$GITHUB_REPOSITORY" --yes || true
+            done
+          fi
+          ls -lh release-assets/
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber release-assets/*
+          rm -rf release-assets
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
