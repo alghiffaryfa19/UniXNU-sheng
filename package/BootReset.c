@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: MIT
-// Board glue for BootResetCore.h: PSCI feature probe, a read-only look at the PMIC arbiter and the reboot-reason cell, and the guarded
-// "restart into fastboot" (boot argument autoreset=<seconds>, see BootLog.c). Nothing here runs without BootLog's boot arguments.
+// Board power transitions and opt-in reset diagnostics. Normal macOS shutdown
+// uses the platform callback; BootLog arguments control diagnostic reset paths.
 #include <kern/thread.h>
 #include <machine/machine_routines.h>
 #include <string.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOPlatformExpert.h>
 #include <kern/sched.h>
 #include <pexpert/pexpert.h>
 #include "BootResetCore.h"
+#if defined(XNU_TARGET_OS_OSX) && XNU_TARGET_OS_OSX
+#include "BootPower.h"
+#endif
 
 // Physical windows from the sheng devicetree (spmi@c400000 reg, reg-names core/chnls/obsrvr/cnfg).
 enum {SpmiCore = 0xc400000, SpmiCoreSize = 0x3000, SpmiObsrvr = 0xc440000, SpmiChnls = 0xc500000, SpmiCnfg = 0xc42d000, SpmiCnfgSize = 0x4000};
@@ -29,6 +33,31 @@ static uint64_t psci(uint64_t fid, uint64_t a1) {
                    "x14", "x15", "x16", "x17");
   return x0;
 }
+
+#if defined(XNU_TARGET_OS_OSX) && XNU_TARGET_OS_OSX
+static int platform_off_available, platform_reset_available;
+static int platform_power_invoke(uint32_t fid) {
+  const int64_t status = (int64_t)psci(fid, 0);
+  // A completed PSCI transition never returns to this kernel.
+  IOLog("[power] PSCI %x returned %lld\n", fid, (long long)status);
+  return -1;
+}
+static int platform_halt_restart(unsigned type) {
+  IOLog("[power] platform request %u off=%d reset=%d\n", type,
+        platform_off_available, platform_reset_available);
+  return boot_power_dispatch(type, platform_off_available, platform_reset_available,
+                             platform_power_invoke);
+}
+void boot_reset_install_platform(void) {
+  platform_off_available = (int32_t)psci(PsciFeatures, BootPowerOff) >= 0;
+  platform_reset_available = (int32_t)psci(PsciFeatures, BootPowerReset) >= 0;
+  int (*expected)(unsigned) = NULL;
+  const int installed = __atomic_compare_exchange_n(&PE_halt_restart, &expected,
+      platform_halt_restart, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+  IOLog("[power] platform handler %s off=%d reset=%d\n",
+        installed ? "installed" : "retained", platform_off_available, platform_reset_available);
+}
+#endif
 
 // ml_io_map hands out permanent mappings (io_submap, KMA_PERMANENT) that ml_io_unmap cannot free: its kmem_free on kernel_map panics with the
 // map lock held (int-105 hung launchd that way). Mappings that are unmapped again must be unmappable ones (flags 7 = VM_WIMG_IO).
@@ -101,39 +130,55 @@ int boot_reset_mark_bootloader(char *text, unsigned cap) {
   return rc ? 10 + rc : 0;
 }
 
-// The hypervisor's watchdog (Gunyah, SMCCC vendor hypervisor calls 5 control, 6 status, 7 ping, 8 set time in ms, as Linux gunyah_wdt
-// uses them). An unattended run arms it with a 60 s timeout and pings it from its own thread until <deadline> seconds after the start, then
-// stops pinging: the hypervisor restarts the tablet even when the kernel hangs or panics, and the cell above makes that restart fastboot.
-enum {GunyahWdtControl = 0x86000005u, GunyahWdtStatus = 0x86000006u, GunyahWdtPing = 0x86000007u, GunyahWdtSetTime = 0x86000008u,
-      GunyahWdtEnable = 3, GunyahWdtDisable = 2, GunyahWdtTimeoutMs = 60000};
+// Gunyah accepts watchdog timeouts up to 32000 ms. Firmware hands over an armed 30000 ms timer;
+// this kernel pings it every 10 s until the unattended deadline. A zero deadline keeps it running.
+_Static_assert(BR_WDT_TIMEOUT_MS <= 32000, "Gunyah watchdog timeout exceeds the hypervisor limit");
 volatile int32_t boot_reset_wdt_stats[4];   // [0] status call result, [1] set-time result, [2] enable result, [3] pings sent
 static uint32_t wdt_deadline;
+static unsigned wdt_stopped;
+void boot_reset_watchdog_stop(void) {
+  __atomic_store_n(&wdt_stopped, 1, __ATOMIC_RELEASE);
+}
+static uint64_t watchdog_ticks(void) {
+  uint64_t value;
+  __asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(value));
+  return value;
+}
 static void wdt_thread(void *arg, wait_result_t wr) {
   (void)arg; (void)wr;
+  thread_set_thread_name(current_thread(), "boot_watchdog");
   uint64_t f = 0; __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f)); if (!f) f = 19200000;
-  const uint64_t start = mach_absolute_time();
-  while ((mach_absolute_time() - start) / f < wdt_deadline) {
-    smc2(GunyahWdtPing, 0, 0, NULL);
+  const uint64_t start = watchdog_ticks();
+  while (!__atomic_load_n(&wdt_stopped, __ATOMIC_ACQUIRE) &&
+         (!wdt_deadline || (watchdog_ticks() - start) / f < wdt_deadline)) {
+    smc2(BR_WDT_PING, 0, 0, NULL);
     boot_reset_wdt_stats[3] = boot_reset_wdt_stats[3] + 1;
     IOSleep(10000);
   }
 }
 int boot_reset_watchdog(uint32_t deadline, char *text, unsigned cap) {
   uint64_t since = 0;
-  const int64_t status = (int64_t)smc2(GunyahWdtStatus, 0, 0, &since);
+  const int64_t status = (int64_t)smc2(BR_WDT_STATUS, 0, 0, &since);
   boot_reset_wdt_stats[0] = (int32_t)status;
   if (status != 0) {snprintf(text, cap, "watchdog: status %lld, not armed", (long long)status); return 1;}
-  smc2(GunyahWdtControl, GunyahWdtDisable, 0, NULL);
-  boot_reset_wdt_stats[1] = (int32_t)smc2(GunyahWdtSetTime, GunyahWdtTimeoutMs, GunyahWdtTimeoutMs, NULL);
-  if (boot_reset_wdt_stats[1]) {snprintf(text, cap, "watchdog: set time %d, not armed", boot_reset_wdt_stats[1]); return 2;}
+  uint32_t inherited = 0;
+  PE_parse_boot_argn("uefi-watchdog", &inherited, sizeof inherited);
+  if (inherited) {
+    boot_reset_wdt_stats[1] = (int32_t)smc2(BR_WDT_PING, 0, 0, NULL);
+  } else {
+    smc2(BR_WDT_CONTROL, BR_WDT_DISABLE, 0, NULL);
+    boot_reset_wdt_stats[1] = (int32_t)smc2(BR_WDT_SET_TIME, BR_WDT_TIMEOUT_MS, BR_WDT_TIMEOUT_MS, NULL);
+  }
+  if (boot_reset_wdt_stats[1]) {snprintf(text, cap, "watchdog: prepare %d", boot_reset_wdt_stats[1]); return 2;}
+  boot_reset_wdt_stats[2] = inherited ? 0 : (int32_t)smc2(BR_WDT_CONTROL, BR_WDT_ENABLE, 0, NULL);
+  if (boot_reset_wdt_stats[2]) {snprintf(text, cap, "watchdog: enable %d", boot_reset_wdt_stats[2]); return 4;}
   wdt_deadline = deadline;
   thread_t thread;
   if (kernel_thread_start_priority(wdt_thread, NULL, MAXPRI_KERNEL, &thread) != KERN_SUCCESS) {snprintf(text, cap, "watchdog: no thread"); return 3;}
   thread_deallocate(thread);
-  boot_reset_wdt_stats[2] = (int32_t)smc2(GunyahWdtControl, GunyahWdtEnable, 0, NULL);
-  snprintf(text, cap, "watchdog: armed %d, pings until %us, bite 60 s later (last ping %llu ms ago)", boot_reset_wdt_stats[2], deadline,
-           (unsigned long long)since);
-  return boot_reset_wdt_stats[2] ? 4 : 0;
+  snprintf(text, cap, "watchdog: armed=1 inherited=%u timeout=%u ms deadline=%us last-ping=%llu ms", inherited,
+           BR_WDT_TIMEOUT_MS, deadline, (unsigned long long)since);
+  return 0;
 }
 
 // Writes "bootloader" into the reboot-reason cell, verifies it, then PSCI SYSTEM_RESET. Returns only when something refused (text says what);
