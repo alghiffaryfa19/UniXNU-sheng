@@ -108,7 +108,7 @@ jobs:
               if f.is_file() and f.suffix in ('.c', '.h'):
                   txt = f.read_text(errors='ignore')
                   modified = False
-                  if 'BR_WDT_TIMEOUT_MS' in txt and '#include "BootResetCore.h"' not in txt and f.name.endswith('.h'):
+                  if 'BR_WDT_TIMEOUT_MS' in txt and '#include "BootResetCore.h"' not in txt and f.name.endswith('.h') and f.name != 'BootResetCore.h':
                       txt = '#include "BootResetCore.h"\n' + txt
                       modified = True
                   if 'ShengWatchdogCall (0x84000009' in txt:
